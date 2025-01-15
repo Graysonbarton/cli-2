@@ -152,13 +152,13 @@ func StatusCheckRollupGraphQLWithCountByState() string {
 					contexts {
 						checkRunCount,
 						checkRunCountsByState {
-						  state,
-						  count
+							state,
+							count
 						},
 						statusContextCount,
 						statusContextCountsByState {
-						  state,
-						  count
+							state,
+							count
 						}
 					}
 				}
@@ -285,6 +285,7 @@ var PullRequestFields = append(sharedIssuePRFields,
 	"additions",
 	"autoMergeRequest",
 	"baseRefName",
+	"baseRefOid",
 	"changedFiles",
 	"commits",
 	"deletions",
@@ -400,6 +401,7 @@ var RepositoryFields = []string{
 	"createdAt",
 	"pushedAt",
 	"updatedAt",
+	"archivedAt",
 
 	"isBlankIssuesEnabled",
 	"isSecurityPolicyEnabled",
