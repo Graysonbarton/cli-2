@@ -27,6 +27,29 @@ const (
 // Allow injecting backoff interval in tests.
 var getAttestationRetryInterval = time.Millisecond * 200
 
+// FetchParams are the parameters for fetching attestations from the GitHub API
+type FetchParams struct {
+	Digest        string
+	Limit         int
+	Owner         string
+	PredicateType string
+	Repo          string
+	Initiator     string
+}
+
+func (p *FetchParams) Validate() error {
+	if p.Digest == "" {
+		return fmt.Errorf("digest must be provided")
+	}
+	if p.Limit <= 0 || p.Limit > maxLimitForFlag {
+		return fmt.Errorf("limit must be greater than 0 and less than or equal to %d", maxLimitForFlag)
+	}
+	if p.Repo == "" && p.Owner == "" {
+		return fmt.Errorf("owner or repo must be provided")
+	}
+	return nil
+}
+
 // githubApiClient makes REST calls to the GitHub API
 type githubApiClient interface {
 	REST(hostname, method, p string, body io.Reader, data interface{}) error
@@ -39,8 +62,7 @@ type httpClient interface {
 }
 
 type Client interface {
-	GetByRepoAndDigest(repo, digest string, limit int) ([]*Attestation, error)
-	GetByOwnerAndDigest(owner, digest string, limit int) ([]*Attestation, error)
+	GetByDigest(params FetchParams) ([]*Attestation, error)
 	GetTrustDomain() (string, error)
 }
 
@@ -60,15 +82,11 @@ func NewLiveClient(hc *http.Client, host string, l *ioconfig.Handler) *LiveClien
 	}
 }
 
-func (c *LiveClient) BuildRepoAndDigestURL(repo, digest string) string {
-	repo = strings.Trim(repo, "/")
-	return fmt.Sprintf(GetAttestationByRepoAndSubjectDigestPath, repo, digest)
-}
-
-// GetByRepoAndDigest fetches the attestation by repo and digest
-func (c *LiveClient) GetByRepoAndDigest(repo, digest string, limit int) ([]*Attestation, error) {
-	url := c.BuildRepoAndDigestURL(repo, digest)
-	attestations, err := c.getAttestations(url, repo, digest, limit)
+// GetByDigest fetches the attestation by digest and either owner or repo
+// depending on which is provided
+func (c *LiveClient) GetByDigest(params FetchParams) ([]*Attestation, error) {
+	c.logger.VerbosePrintf("Fetching attestations for artifact digest %s\n\n", params.Digest)
+	attestations, err := c.getAttestations(params)
 	if err != nil {
 		return nil, err
 	}
@@ -81,70 +99,66 @@ func (c *LiveClient) GetByRepoAndDigest(repo, digest string, limit int) ([]*Atte
 	return bundles, nil
 }
 
-func (c *LiveClient) BuildOwnerAndDigestURL(owner, digest string) string {
-	owner = strings.Trim(owner, "/")
-	return fmt.Sprintf(GetAttestationByOwnerAndSubjectDigestPath, owner, digest)
-}
-
-// GetByOwnerAndDigest fetches attestation by owner and digest
-func (c *LiveClient) GetByOwnerAndDigest(owner, digest string, limit int) ([]*Attestation, error) {
-	url := c.BuildOwnerAndDigestURL(owner, digest)
-	attestations, err := c.getAttestations(url, owner, digest, limit)
-	if err != nil {
-		return nil, err
+func (c *LiveClient) buildRequestURL(params FetchParams) (string, error) {
+	if err := params.Validate(); err != nil {
+		return "", err
 	}
 
-	if len(attestations) == 0 {
-		return nil, newErrNoAttestations(owner, digest)
+	var url string
+	if params.Repo != "" {
+		// check if Repo is set first because if Repo has been set, Owner will be set using the value of Repo.
+		// If Repo is not set, the field will remain empty. It will not be populated using the value of Owner.
+		url = fmt.Sprintf(GetAttestationByRepoAndSubjectDigestPath, params.Repo, params.Digest)
+	} else {
+		url = fmt.Sprintf(GetAttestationByOwnerAndSubjectDigestPath, params.Owner, params.Digest)
 	}
 
-	bundles, err := c.fetchBundleFromAttestations(attestations)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch bundle with URL: %w", err)
-	}
-
-	return bundles, nil
-}
-
-// GetTrustDomain returns the current trust domain. If the default is used
-// the empty string is returned
-func (c *LiveClient) GetTrustDomain() (string, error) {
-	return c.getTrustDomain(MetaPath)
-}
-
-func (c *LiveClient) getAttestations(url, name, digest string, limit int) ([]*Attestation, error) {
-	c.logger.VerbosePrintf("Fetching attestations for artifact digest %s\n\n", digest)
-
-	perPage := limit
-	if perPage <= 0 || perPage > maxLimitForFlag {
-		return nil, fmt.Errorf("limit must be greater than 0 and less than or equal to %d", maxLimitForFlag)
-	}
-
+	perPage := params.Limit
 	if perPage > maxLimitForFetch {
 		perPage = maxLimitForFetch
 	}
 
 	// ref: https://github.com/cli/go-gh/blob/d32c104a9a25c9de3d7c7b07a43ae0091441c858/example_gh_test.go#L96
 	url = fmt.Sprintf("%s?per_page=%d", url, perPage)
+	if params.PredicateType != "" {
+		url = fmt.Sprintf("%s&predicate_type=%s", url, params.PredicateType)
+	}
+	return url, nil
+}
+
+func (c *LiveClient) getAttestations(params FetchParams) ([]*Attestation, error) {
+	url, err := c.buildRequestURL(params)
+	if err != nil {
+		return nil, err
+	}
 
 	var attestations []*Attestation
 	var resp AttestationsResponse
 	bo := backoff.NewConstantBackOff(getAttestationRetryInterval)
 
 	// if no attestation or less than limit, then keep fetching
-	for url != "" && len(attestations) < limit {
+	for url != "" && len(attestations) < params.Limit {
 		err := backoff.Retry(func() error {
 			newURL, restErr := c.githubAPI.RESTWithNext(c.host, http.MethodGet, url, nil, &resp)
-
 			if restErr != nil {
 				if shouldRetry(restErr) {
 					return restErr
-				} else {
-					return backoff.Permanent(restErr)
 				}
+				return backoff.Permanent(restErr)
 			}
 
 			url = newURL
+
+			// filter by the initiator type
+			if params.Initiator != "" {
+				filtered := make([]*Attestation, 0, len(resp.Attestations))
+				for _, att := range resp.Attestations {
+					if att.Initiator == params.Initiator {
+						filtered = append(filtered, att)
+					}
+				}
+				resp.Attestations = filtered
+			}
 			attestations = append(attestations, resp.Attestations...)
 
 			return nil
@@ -157,11 +171,11 @@ func (c *LiveClient) getAttestations(url, name, digest string, limit int) ([]*At
 	}
 
 	if len(attestations) == 0 {
-		return nil, newErrNoAttestations(name, digest)
+		return nil, ErrNoAttestationsFound
 	}
 
-	if len(attestations) > limit {
-		return attestations[:limit], nil
+	if len(attestations) > params.Limit {
+		return attestations[:params.Limit], nil
 	}
 
 	return attestations, nil
@@ -176,23 +190,22 @@ func (c *LiveClient) fetchBundleFromAttestations(attestations []*Attestation) ([
 				return fmt.Errorf("attestation has no bundle or bundle URL")
 			}
 
-			// If the bundle field is nil, try to fetch the bundle with the provided URL
-			if a.Bundle == nil {
-				c.logger.VerbosePrintf("Bundle field is empty. Trying to fetch with bundle URL\n\n")
-				b, err := c.GetBundle(a.BundleURL)
-				if err != nil {
-					return fmt.Errorf("failed to fetch bundle with URL: %w", err)
-				}
+			// for now, we fall back to the bundle field if the bundle URL is empty
+			if a.BundleURL == "" {
+				c.logger.VerbosePrintf("Bundle URL is empty. Falling back to bundle field\n\n")
 				fetched[i] = &Attestation{
-					Bundle: b,
+					Bundle: a.Bundle,
 				}
 				return nil
 			}
 
-			// otherwise fall back to the bundle field
-			c.logger.VerbosePrintf("Fetching bundle from Bundle field\n\n")
+			// otherwise fetch the bundle with the provided URL
+			b, err := c.getBundle(a.BundleURL)
+			if err != nil {
+				return fmt.Errorf("failed to fetch bundle with URL: %w", err)
+			}
 			fetched[i] = &Attestation{
-				Bundle: a.Bundle,
+				Bundle: b,
 			}
 
 			return nil
@@ -206,38 +219,49 @@ func (c *LiveClient) fetchBundleFromAttestations(attestations []*Attestation) ([
 	return fetched, nil
 }
 
-func (c *LiveClient) GetBundle(url string) (*bundle.Bundle, error) {
+func (c *LiveClient) getBundle(url string) (*bundle.Bundle, error) {
 	c.logger.VerbosePrintf("Fetching attestation bundle with bundle URL\n\n")
 
-	resp, err := c.httpClient.Get(url)
-	if err != nil {
-		return nil, err
-	}
+	var sgBundle *bundle.Bundle
+	bo := backoff.NewConstantBackOff(getAttestationRetryInterval)
+	err := backoff.Retry(func() error {
+		resp, err := c.httpClient.Get(url)
+		if err != nil {
+			return fmt.Errorf("request to fetch bundle from URL failed: %w", err)
+		}
 
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
+		if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
+			return fmt.Errorf("attestation bundle with URL %s returned status code %d", url, resp.StatusCode)
+		}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read blob storage response body: %w", err)
-	}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read blob storage response body: %w", err)
+		}
 
-	var out []byte
-	decompressed, err := snappy.Decode(out, body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decompress with snappy: %w", err)
-	}
+		var out []byte
+		decompressed, err := snappy.Decode(out, body)
+		if err != nil {
+			return backoff.Permanent(fmt.Errorf("failed to decompress with snappy: %w", err))
+		}
 
-	var pbBundle v1.Bundle
-	if err = protojson.Unmarshal(decompressed, &pbBundle); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal to bundle: %w", err)
-	}
+		var pbBundle v1.Bundle
+		if err = protojson.Unmarshal(decompressed, &pbBundle); err != nil {
+			return backoff.Permanent(fmt.Errorf("failed to unmarshal to bundle: %w", err))
+		}
 
-	c.logger.VerbosePrintf("Successfully fetched bundle\n\n")
+		c.logger.VerbosePrintf("Successfully fetched bundle\n\n")
 
-	return bundle.NewBundle(&pbBundle)
+		sgBundle, err = bundle.NewBundle(&pbBundle)
+		if err != nil {
+			return backoff.Permanent(fmt.Errorf("failed to create new bundle: %w", err))
+		}
+
+		return nil
+	}, backoff.WithMaxRetries(bo, 3))
+
+	return sgBundle, err
 }
 
 func shouldRetry(err error) bool {
@@ -249,6 +273,12 @@ func shouldRetry(err error) bool {
 	}
 
 	return false
+}
+
+// GetTrustDomain returns the current trust domain. If the default is used
+// the empty string is returned
+func (c *LiveClient) GetTrustDomain() (string, error) {
+	return c.getTrustDomain(MetaPath)
 }
 
 func (c *LiveClient) getTrustDomain(url string) (string, error) {

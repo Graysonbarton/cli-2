@@ -3,6 +3,7 @@
 package verify
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/cli/cli/v2/pkg/cmd/attestation/api"
@@ -10,6 +11,7 @@ import (
 	"github.com/cli/cli/v2/pkg/cmd/attestation/io"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/test"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/verification"
+	o "github.com/cli/cli/v2/pkg/option"
 	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 	"github.com/stretchr/testify/require"
 )
@@ -24,9 +26,12 @@ func getAttestationsFor(t *testing.T, bundlePath string) []*api.Attestation {
 }
 
 func TestVerifyAttestations(t *testing.T) {
-	sgVerifier := verification.NewLiveSigstoreVerifier(verification.SigstoreConfig{
-		Logger: io.NewTestHandler(),
+	sgVerifier, err := verification.NewLiveSigstoreVerifier(verification.SigstoreConfig{
+		HttpClient:     http.DefaultClient,
+		Logger:         io.NewTestHandler(),
+		TUFMetadataDir: o.Some(t.TempDir()),
 	})
+	require.NoError(t, err)
 
 	certSummary := certificate.Summary{}
 	certSummary.SourceRepositoryOwnerURI = "https://github.com/sigstore"

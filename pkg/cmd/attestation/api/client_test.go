@@ -5,7 +5,6 @@ import (
 
 	"github.com/cli/cli/v2/pkg/cmd/attestation/io"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/test/data"
-
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,7 +16,8 @@ const (
 
 func NewClientWithMockGHClient(hasNextPage bool) Client {
 	fetcher := mockDataGenerator{
-		NumAttestations: 5,
+		NumUserAttestations:   5,
+		NumGitHubAttestations: 4,
 	}
 	l := io.NewTestHandler()
 
@@ -42,101 +42,94 @@ func NewClientWithMockGHClient(hasNextPage bool) Client {
 	}
 }
 
-func TestGetURL(t *testing.T) {
-	c := LiveClient{}
+var testFetchParamsWithOwner = FetchParams{
+	Digest:        testDigest,
+	Limit:         DefaultLimit,
+	Owner:         testOwner,
+	PredicateType: "https://slsa.dev/provenance/v1",
+	Initiator:     "user",
+}
+var testFetchParamsWithRepo = FetchParams{
+	Digest:        testDigest,
+	Limit:         DefaultLimit,
+	Repo:          testRepo,
+	PredicateType: "https://slsa.dev/provenance/v1",
+	Initiator:     "user",
+}
 
-	testData := []struct {
-		repo     string
-		digest   string
-		expected string
-	}{
-		{repo: "/github/example/", digest: "sha256:12313213", expected: "repos/github/example/attestations/sha256:12313213"},
-		{repo: "/github/example", digest: "sha256:12313213", expected: "repos/github/example/attestations/sha256:12313213"},
-	}
+var testFetchParamsWithRepoWithGitHubInitiator = FetchParams{
+	Digest:    testDigest,
+	Limit:     DefaultLimit,
+	Repo:      testRepo,
+	Initiator: "github",
+}
 
-	for _, data := range testData {
-		s := c.BuildRepoAndDigestURL(data.repo, data.digest)
-		require.Equal(t, data.expected, s)
-	}
+type getByTestCase struct {
+	name                 string
+	params               FetchParams
+	limit                int
+	expectedAttestations int
+	hasNextPage          bool
+}
+
+var getByTestCases = []getByTestCase{
+	{
+		name:                 "get by digest with owner",
+		params:               testFetchParamsWithOwner,
+		expectedAttestations: 5,
+	},
+	{
+		name:                 "get by digest with repo",
+		params:               testFetchParamsWithRepo,
+		expectedAttestations: 5,
+	},
+	{
+		name:                 "get by digest with attestations greater than limit",
+		params:               testFetchParamsWithRepo,
+		limit:                3,
+		expectedAttestations: 3,
+	},
+	{
+		name:                 "get by digest with next page",
+		params:               testFetchParamsWithRepo,
+		expectedAttestations: 10,
+		hasNextPage:          true,
+	},
+	{
+		name:                 "greater than limit with next page",
+		params:               testFetchParamsWithRepo,
+		limit:                7,
+		expectedAttestations: 7,
+		hasNextPage:          true,
+	},
+	{
+		name:                 "get by digest with repo and GitHub initiator",
+		params:               testFetchParamsWithRepoWithGitHubInitiator,
+		expectedAttestations: 4,
+	},
 }
 
 func TestGetByDigest(t *testing.T) {
-	c := NewClientWithMockGHClient(false)
-	attestations, err := c.GetByRepoAndDigest(testRepo, testDigest, DefaultLimit)
-	require.NoError(t, err)
+	for _, tc := range getByTestCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewClientWithMockGHClient(tc.hasNextPage)
 
-	require.Equal(t, 5, len(attestations))
-	bundle := (attestations)[0].Bundle
-	require.Equal(t, bundle.GetMediaType(), "application/vnd.dev.sigstore.bundle.v0.3+json")
+			if tc.limit > 0 {
+				tc.params.Limit = tc.limit
+			}
+			attestations, err := c.GetByDigest(tc.params)
+			require.NoError(t, err)
 
-	attestations, err = c.GetByOwnerAndDigest(testOwner, testDigest, DefaultLimit)
-	require.NoError(t, err)
-
-	require.Equal(t, 5, len(attestations))
-	bundle = (attestations)[0].Bundle
-	require.Equal(t, bundle.GetMediaType(), "application/vnd.dev.sigstore.bundle.v0.3+json")
-}
-
-func TestGetByDigestGreaterThanLimit(t *testing.T) {
-	c := NewClientWithMockGHClient(false)
-
-	limit := 3
-	// The method should return five results when the limit is not set
-	attestations, err := c.GetByRepoAndDigest(testRepo, testDigest, limit)
-	require.NoError(t, err)
-
-	require.Equal(t, 3, len(attestations))
-	bundle := (attestations)[0].Bundle
-	require.Equal(t, bundle.GetMediaType(), "application/vnd.dev.sigstore.bundle.v0.3+json")
-
-	attestations, err = c.GetByOwnerAndDigest(testOwner, testDigest, limit)
-	require.NoError(t, err)
-
-	require.Equal(t, len(attestations), limit)
-	bundle = (attestations)[0].Bundle
-	require.Equal(t, bundle.GetMediaType(), "application/vnd.dev.sigstore.bundle.v0.3+json")
-}
-
-func TestGetByDigestWithNextPage(t *testing.T) {
-	c := NewClientWithMockGHClient(true)
-	attestations, err := c.GetByRepoAndDigest(testRepo, testDigest, DefaultLimit)
-	require.NoError(t, err)
-
-	require.Equal(t, len(attestations), 10)
-	bundle := (attestations)[0].Bundle
-	require.Equal(t, bundle.GetMediaType(), "application/vnd.dev.sigstore.bundle.v0.3+json")
-
-	attestations, err = c.GetByOwnerAndDigest(testOwner, testDigest, DefaultLimit)
-	require.NoError(t, err)
-
-	require.Equal(t, len(attestations), 10)
-	bundle = (attestations)[0].Bundle
-	require.Equal(t, bundle.GetMediaType(), "application/vnd.dev.sigstore.bundle.v0.3+json")
-}
-
-func TestGetByDigestGreaterThanLimitWithNextPage(t *testing.T) {
-	c := NewClientWithMockGHClient(true)
-
-	limit := 7
-	// The method should return five results when the limit is not set
-	attestations, err := c.GetByRepoAndDigest(testRepo, testDigest, limit)
-	require.NoError(t, err)
-
-	require.Equal(t, len(attestations), limit)
-	bundle := (attestations)[0].Bundle
-	require.Equal(t, bundle.GetMediaType(), "application/vnd.dev.sigstore.bundle.v0.3+json")
-
-	attestations, err = c.GetByOwnerAndDigest(testOwner, testDigest, limit)
-	require.NoError(t, err)
-
-	require.Equal(t, len(attestations), limit)
-	bundle = (attestations)[0].Bundle
-	require.Equal(t, bundle.GetMediaType(), "application/vnd.dev.sigstore.bundle.v0.3+json")
+			require.Equal(t, tc.expectedAttestations, len(attestations))
+			bundle := (attestations)[0].Bundle
+			require.Equal(t, bundle.GetMediaType(), "application/vnd.dev.sigstore.bundle.v0.3+json")
+		})
+	}
 }
 
 func TestGetByDigest_NoAttestationsFound(t *testing.T) {
 	fetcher := mockDataGenerator{
-		NumAttestations: 5,
+		NumUserAttestations: 5,
 	}
 
 	httpClient := &mockHttpClient{}
@@ -148,20 +141,15 @@ func TestGetByDigest_NoAttestationsFound(t *testing.T) {
 		logger:     io.NewTestHandler(),
 	}
 
-	attestations, err := c.GetByRepoAndDigest(testRepo, testDigest, DefaultLimit)
+	attestations, err := c.GetByDigest(testFetchParamsWithRepo)
 	require.Error(t, err)
-	require.IsType(t, ErrNoAttestations{}, err)
-	require.Nil(t, attestations)
-
-	attestations, err = c.GetByOwnerAndDigest(testOwner, testDigest, DefaultLimit)
-	require.Error(t, err)
-	require.IsType(t, ErrNoAttestations{}, err)
+	require.IsType(t, ErrNoAttestationsFound, err)
 	require.Nil(t, attestations)
 }
 
 func TestGetByDigest_Error(t *testing.T) {
 	fetcher := mockDataGenerator{
-		NumAttestations: 5,
+		NumUserAttestations: 5,
 	}
 
 	c := LiveClient{
@@ -171,11 +159,7 @@ func TestGetByDigest_Error(t *testing.T) {
 		logger: io.NewTestHandler(),
 	}
 
-	attestations, err := c.GetByRepoAndDigest(testRepo, testDigest, DefaultLimit)
-	require.Error(t, err)
-	require.Nil(t, attestations)
-
-	attestations, err = c.GetByOwnerAndDigest(testOwner, testDigest, DefaultLimit)
+	attestations, err := c.GetByDigest(testFetchParamsWithRepo)
 	require.Error(t, err)
 	require.Nil(t, attestations)
 }
@@ -188,10 +172,7 @@ func TestFetchBundleFromAttestations_BundleURL(t *testing.T) {
 	}
 
 	att1 := makeTestAttestation()
-	att1.Bundle = nil
 	att2 := makeTestAttestation()
-	att2.Bundle = nil
-	// zero out the bundle field so it tries fetching by URL
 	attestations := []*Attestation{&att1, &att2}
 	fetched, err := client.fetchBundleFromAttestations(attestations)
 	require.NoError(t, err)
@@ -200,42 +181,46 @@ func TestFetchBundleFromAttestations_BundleURL(t *testing.T) {
 	httpClient.AssertNumberOfCalls(t, "OnGetSuccess", 2)
 }
 
-func TestFetchBundleFromAttestations_InvalidAttestation(t *testing.T) {
+func TestFetchBundleFromAttestations_MissingBundleAndBundleURLFields(t *testing.T) {
 	httpClient := &mockHttpClient{}
 	client := LiveClient{
 		httpClient: httpClient,
 		logger:     io.NewTestHandler(),
 	}
 
+	// If both the BundleURL and Bundle fields are empty, the function should
+	// return an error indicating that
 	att1 := Attestation{}
 	attestations := []*Attestation{&att1}
-	fetched, err := client.fetchBundleFromAttestations(attestations)
-	require.Error(t, err)
-	require.Nil(t, fetched, 2)
+	bundles, err := client.fetchBundleFromAttestations(attestations)
+	require.ErrorContains(t, err, "attestation has no bundle or bundle URL")
+	require.Nil(t, bundles, 2)
 }
 
-func TestFetchBundleFromAttestations_Fail_BundleURL(t *testing.T) {
-	httpClient := &failAfterOneCallHttpClient{}
+func TestFetchBundleFromAttestations_FailOnTheSecondAttestation(t *testing.T) {
+	mockHTTPClient := &failAfterNCallsHttpClient{
+		// the initial HTTP request will succeed, which returns a bundle for the first attestation
+		// all following HTTP requests will fail, which means the function fails to fetch a bundle
+		// for the second attestation and the function returns an error
+		FailOnCallN:              2,
+		FailOnAllSubsequentCalls: true,
+	}
 
 	c := &LiveClient{
-		httpClient: httpClient,
+		httpClient: mockHTTPClient,
 		logger:     io.NewTestHandler(),
 	}
 
 	att1 := makeTestAttestation()
-	att1.Bundle = nil
 	att2 := makeTestAttestation()
-	att2.Bundle = nil
-	// zero out the bundle field so it tries fetching by URL
 	attestations := []*Attestation{&att1, &att2}
-	fetched, err := c.fetchBundleFromAttestations(attestations)
+	bundles, err := c.fetchBundleFromAttestations(attestations)
 	require.Error(t, err)
-	require.Nil(t, fetched)
-	httpClient.AssertNumberOfCalls(t, "OnGetFailAfterOneCall", 2)
+	require.Nil(t, bundles)
 }
 
-func TestFetchBundleFromAttestations_FetchByURLFail(t *testing.T) {
-	mockHTTPClient := &failHttpClient{}
+func TestFetchBundleFromAttestations_FailAfterRetrying(t *testing.T) {
+	mockHTTPClient := &reqFailHttpClient{}
 
 	c := &LiveClient{
 		httpClient: mockHTTPClient,
@@ -243,15 +228,14 @@ func TestFetchBundleFromAttestations_FetchByURLFail(t *testing.T) {
 	}
 
 	a := makeTestAttestation()
-	a.Bundle = nil
 	attestations := []*Attestation{&a}
 	bundle, err := c.fetchBundleFromAttestations(attestations)
 	require.Error(t, err)
 	require.Nil(t, bundle)
-	mockHTTPClient.AssertNumberOfCalls(t, "OnGetFail", 1)
+	mockHTTPClient.AssertNumberOfCalls(t, "OnGetReqFail", 4)
 }
 
-func TestFetchBundleByURL_FallbackToBundleField(t *testing.T) {
+func TestFetchBundleFromAttestations_FallbackToBundleField(t *testing.T) {
 	mockHTTPClient := &mockHttpClient{}
 
 	c := &LiveClient{
@@ -259,12 +243,78 @@ func TestFetchBundleByURL_FallbackToBundleField(t *testing.T) {
 		logger:     io.NewTestHandler(),
 	}
 
+	// If the bundle URL is empty, the code will fallback to the bundle field
 	a := Attestation{Bundle: data.SigstoreBundle(t)}
 	attestations := []*Attestation{&a}
 	fetched, err := c.fetchBundleFromAttestations(attestations)
 	require.NoError(t, err)
 	require.Equal(t, "application/vnd.dev.sigstore.bundle.v0.3+json", fetched[0].Bundle.GetMediaType())
 	mockHTTPClient.AssertNotCalled(t, "OnGetSuccess")
+}
+
+// getBundle successfully fetches a bundle on the first HTTP request attempt
+func TestGetBundle(t *testing.T) {
+	mockHTTPClient := &mockHttpClient{}
+
+	c := &LiveClient{
+		httpClient: mockHTTPClient,
+		logger:     io.NewTestHandler(),
+	}
+
+	b, err := c.getBundle("https://mybundleurl.com")
+	require.NoError(t, err)
+	require.Equal(t, "application/vnd.dev.sigstore.bundle.v0.3+json", b.GetMediaType())
+	mockHTTPClient.AssertNumberOfCalls(t, "OnGetSuccess", 1)
+}
+
+// getBundle retries successfully when the initial HTTP request returns
+// a 5XX status code
+func TestGetBundle_SuccessfulRetry(t *testing.T) {
+	mockHTTPClient := &failAfterNCallsHttpClient{
+		FailOnCallN:              1,
+		FailOnAllSubsequentCalls: false,
+	}
+
+	c := &LiveClient{
+		httpClient: mockHTTPClient,
+		logger:     io.NewTestHandler(),
+	}
+
+	b, err := c.getBundle("mybundleurl")
+	require.NoError(t, err)
+	require.Equal(t, "application/vnd.dev.sigstore.bundle.v0.3+json", b.GetMediaType())
+	mockHTTPClient.AssertNumberOfCalls(t, "OnGetFailAfterNCalls", 2)
+}
+
+// getBundle does not retry when the function fails with a permanent backoff error condition
+func TestGetBundle_PermanentBackoffFail(t *testing.T) {
+	mockHTTPClient := &invalidBundleClient{}
+	c := &LiveClient{
+		httpClient: mockHTTPClient,
+		logger:     io.NewTestHandler(),
+	}
+
+	b, err := c.getBundle("mybundleurl")
+	// var permanent *backoff.PermanentError
+	//require.IsType(t, &backoff.PermanentError{}, err)
+	require.Error(t, err)
+	require.Nil(t, b)
+	mockHTTPClient.AssertNumberOfCalls(t, "OnGetInvalidBundle", 1)
+}
+
+// getBundle retries when the HTTP request fails
+func TestGetBundle_RequestFail(t *testing.T) {
+	mockHTTPClient := &reqFailHttpClient{}
+
+	c := &LiveClient{
+		httpClient: mockHTTPClient,
+		logger:     io.NewTestHandler(),
+	}
+
+	b, err := c.getBundle("mybundleurl")
+	require.Error(t, err)
+	require.Nil(t, b)
+	mockHTTPClient.AssertNumberOfCalls(t, "OnGetReqFail", 4)
 }
 
 func TestGetTrustDomain(t *testing.T) {
@@ -303,7 +353,7 @@ func TestGetAttestationsRetries(t *testing.T) {
 	getAttestationRetryInterval = 0
 
 	fetcher := mockDataGenerator{
-		NumAttestations: 5,
+		NumUserAttestations: 5,
 	}
 
 	c := &LiveClient{
@@ -314,7 +364,8 @@ func TestGetAttestationsRetries(t *testing.T) {
 		logger:     io.NewTestHandler(),
 	}
 
-	attestations, err := c.GetByRepoAndDigest(testRepo, testDigest, DefaultLimit)
+	testFetchParamsWithRepo.Limit = 30
+	attestations, err := c.GetByDigest(testFetchParamsWithRepo)
 	require.NoError(t, err)
 
 	// assert the error path was executed; because this is a paged
@@ -325,17 +376,6 @@ func TestGetAttestationsRetries(t *testing.T) {
 	require.Equal(t, len(attestations), 10)
 	bundle := (attestations)[0].Bundle
 	require.Equal(t, bundle.GetMediaType(), "application/vnd.dev.sigstore.bundle.v0.3+json")
-
-	// same test as above, but for GetByOwnerAndDigest:
-	attestations, err = c.GetByOwnerAndDigest(testOwner, testDigest, DefaultLimit)
-	require.NoError(t, err)
-
-	// because we haven't reset the mock, we have added 2 more failed requests
-	fetcher.AssertNumberOfCalls(t, "FlakyOnRESTSuccessWithNextPage:error", 4)
-
-	require.Equal(t, len(attestations), 10)
-	bundle = (attestations)[0].Bundle
-	require.Equal(t, bundle.GetMediaType(), "application/vnd.dev.sigstore.bundle.v0.3+json")
 }
 
 // test total retries
@@ -343,7 +383,7 @@ func TestGetAttestationsMaxRetries(t *testing.T) {
 	getAttestationRetryInterval = 0
 
 	fetcher := mockDataGenerator{
-		NumAttestations: 5,
+		NumUserAttestations: 5,
 	}
 
 	c := &LiveClient{
@@ -353,7 +393,7 @@ func TestGetAttestationsMaxRetries(t *testing.T) {
 		logger: io.NewTestHandler(),
 	}
 
-	_, err := c.GetByRepoAndDigest(testRepo, testDigest, DefaultLimit)
+	_, err := c.GetByDigest(testFetchParamsWithRepo)
 	require.Error(t, err)
 
 	fetcher.AssertNumberOfCalls(t, "OnREST500Error", 4)

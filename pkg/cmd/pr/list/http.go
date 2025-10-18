@@ -5,24 +5,22 @@ import (
 	"net/http"
 
 	"github.com/cli/cli/v2/api"
+	fd "github.com/cli/cli/v2/internal/featuredetection"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	prShared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
-	"github.com/cli/cli/v2/pkg/cmdutil"
 )
 
 func shouldUseSearch(filters prShared.FilterOptions) bool {
 	return filters.Draft != nil || filters.Author != "" || filters.Assignee != "" || filters.Search != "" || len(filters.Labels) > 0
 }
 
-func listPullRequests(httpClient *http.Client, repo ghrepo.Interface, filters prShared.FilterOptions, limit int) (*api.PullRequestAndTotalCount, error) {
+func listPullRequests(httpClient *http.Client, detector fd.Detector, repo ghrepo.Interface, filters prShared.FilterOptions, limit int) (*api.PullRequestAndTotalCount, error) {
 	if shouldUseSearch(filters) {
-		return searchPullRequests(httpClient, repo, filters, limit)
+		return searchPullRequests(httpClient, detector, repo, filters, limit)
 	}
 
-	return prShared.NewLister(&cmdutil.Factory{
-		HttpClient: func() (*http.Client, error) { return httpClient, nil },
-		BaseRepo:   func() (ghrepo.Interface, error) { return repo, nil },
-	}).List(prShared.ListOptions{
+	return prShared.NewLister(httpClient).List(prShared.ListOptions{
+		BaseRepo:     repo,
 		LimitResults: limit,
 		State:        filters.State,
 		BaseBranch:   filters.BaseBranch,
@@ -31,7 +29,16 @@ func listPullRequests(httpClient *http.Client, repo ghrepo.Interface, filters pr
 	})
 }
 
-func searchPullRequests(httpClient *http.Client, repo ghrepo.Interface, filters prShared.FilterOptions, limit int) (*api.PullRequestAndTotalCount, error) {
+func searchPullRequests(httpClient *http.Client, detector fd.Detector, repo ghrepo.Interface, filters prShared.FilterOptions, limit int) (*api.PullRequestAndTotalCount, error) {
+	// TODO advancedIssueSearchCleanup
+	// We won't need feature detection when GHES 3.17 support ends, since
+	// the advanced issue search is the only available search backend for
+	// issues.
+	features, err := detector.SearchFeatures()
+	if err != nil {
+		return nil, err
+	}
+
 	type response struct {
 		Search struct {
 			Nodes    []api.PullRequest
@@ -47,10 +54,11 @@ func searchPullRequests(httpClient *http.Client, repo ghrepo.Interface, filters 
 	query := fragment + `
 		query PullRequestSearch(
 			$q: String!,
+			$type: SearchType!,
 			$limit: Int!,
 			$endCursor: String,
 		) {
-			search(query: $q, type: ISSUE, first: $limit, after: $endCursor) {
+			search(query: $q, type: $type, first: $limit, after: $endCursor) {
 				issueCount
 				nodes {
 					...pr
@@ -62,12 +70,24 @@ func searchPullRequests(httpClient *http.Client, repo ghrepo.Interface, filters 
 			}
 		}`
 
+	variables := map[string]interface{}{}
+
 	filters.Repo = ghrepo.FullName(repo)
 	filters.Entity = "pr"
-	q := prShared.SearchQueryBuild(filters)
+
+	if features.AdvancedIssueSearchAPI {
+		variables["q"] = prShared.SearchQueryBuild(filters, true)
+		if features.AdvancedIssueSearchAPIOptIn {
+			variables["type"] = "ISSUE_ADVANCED"
+		} else {
+			variables["type"] = "ISSUE"
+		}
+	} else {
+		variables["q"] = prShared.SearchQueryBuild(filters, false)
+		variables["type"] = "ISSUE"
+	}
 
 	pageLimit := min(limit, 100)
-	variables := map[string]interface{}{"q": q}
 
 	res := api.PullRequestAndTotalCount{SearchCapped: limit > 1000}
 	var check = make(map[int]struct{})
